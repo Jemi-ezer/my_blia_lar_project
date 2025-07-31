@@ -1,0 +1,148 @@
+#INSTALL PACKAGES AND LOAD LIBRARIES
+install.packages("rpart")
+install.packages("caret")
+install.packages("pROC")
+install.packages("readxl")
+install.packages("ggvenn")
+install.packages("openxlsx")   
+install.packages("e1071")  
+install.packages('MLmetrics')
+library(rpart)
+library(caret)
+library(pROC)
+library(readxl)
+library(ggvenn)
+library(openxlsx)
+library(e1071)
+library(MLmetrics)
+------------------------------
+#To read series matrix file from GEO database
+expr_data <- read.table("GSE76124_series_matrix.txt", sep="\t", comment.char="!", header=TRUE, row.names=1)
+#switching rows with columns
+expr_transposed <- as.data.frame(t(expr_data))
+#Loading selected genes - probe IDs + gene symbols
+gene_map <- read_excel("selected_genes.xlsx") 
+# choose only selected probe
+selected_probes <- gene_map$ProbeID
+expr_selected_genes <- expr_transposed[, colnames(expr_transposed) %in% selected_probes]
+# to rename probes to gene symbols
+probe_to_symbol <- gene_map$GeneSymbol[match(colnames(expr_selected_genes), gene_map$ProbeID)]
+colnames(expr_selected_genes) <- probe_to_symbol
+# Remove duplicated gene symbols
+expr_selected_genes <- expr_selected_genes[, !duplicated(colnames(expr_selected_genes))]
+# Loading sample subtype information
+subtype_info <- read_excel("subtype_info.xlsx")
+# Keeping only 91 samples
+expr_selected_samples <- expr_selected_genes[rownames(expr_selected_genes) %in% subtype_info$Sample, ]
+# Aligning subtype_info order to expression data
+subtype_info_ordered <- subtype_info[match(rownames(expr_selected_samples), subtype_info$Sample), ]
+# Binding the Subtype column
+expr_final <- cbind(Subtype = subtype_info_ordered$Subtype, expr_selected_samples)
+# Converting subtype to factor
+expr_final$Subtype <- as.factor(expr_final$Subtype)
+# Exporting final expression data for ML
+write.xlsx(expr_final, "Final_ML_Expression_Data.xlsx", rowNames = TRUE)
+------------------------------
+#train and test set
+set.seed(123)  
+train_index <- createDataPartition(expr_final$Subtype, p = 0.7, list = FALSE)
+# Spliting the data
+train_data <- expr_final[train_index, ]
+test_data  <- expr_final[-train_index, ]
+#saving files
+write.xlsx(train_data, "Train_Data.xlsx", rowNames = TRUE)
+write.xlsx(test_data,  "Test_Data.xlsx",  rowNames = TRUE)
+------------------------------
+#MODEL SVM
+# converting subtype to factor
+train_data$Subtype <- as.factor(train_data$Subtype)
+test_data$Subtype <- as.factor(test_data$Subtype) 
+# Training SVM model
+set.seed(123)
+svm_model <- svm(Subtype ~ ., data = train_data, kernel = "linear", probability = TRUE)
+# Predict on test data
+svm_pred <- predict(svm_model, newdata = test_data, probability = TRUE)
+# Confusion Matrix
+confusionMatrix(svm_pred, test_data$Subtype)
+# ROC Curve
+svm_prob <- attr(svm_pred, "probabilities")
+roc_obj <- roc(response = test_data$Subtype, predictor = svm_prob[, "BLIA"])
+plot(roc_obj, main = "ROC Curve - SVM", col = "blue", lwd = 2)
+#AUCvalue
+auc(roc_obj)
+#F1 SCORE
+
+confusionMatrix(svm_pred, test_data$Subtype)$byClass["F1"]
+#CV PLOT
+svm_cv <- train(Subtype ~ ., data = train_data, method = "svmLinear",
+                tuneGrid = expand.grid(C = seq(0.01, 1, by = 0.1)),
+                trControl = trainControl(method = "cv", number = 10))
+#to get plot
+plot(svm_cv)
+------------------------------
+#decisiontree
+# train
+tree_model <- rpart(Subtype ~ ., data = train_data, method = "class")
+# Predict on test data
+tree_pred <- predict(tree_model, test_data, type = "class")
+# Confusion matrix
+confusionMatrix(tree_pred, test_data$Subtype)
+#ROC
+tree_probs <- predict(tree_model, test_data, type = "prob") 
+roc_obj <- roc(response = test_data$Subtype,
+               predictor = tree_probs[, "BLIA"],
+               levels = c("LAR", "BLIA"))
+plot(roc_obj, main = "Decision Tree ROC Curve", col = "blue")
+#AUCvalue
+auc(roc_obj)
+#F1 score
+confusionMatrix(tree_pred, test_data$Subtype)$byClass["F1"]
+#cv
+set.seed(123) 
+dt_cv <- train(Subtype ~ ., data = train_data, method = "rpart",
+               tuneGrid = expand.grid(cp = seq(0.001, 0.05, by = 0.005)),
+               trControl = trainControl(method = "cv", number = 10))
+plot(dt_cv)
+------------------------------
+#UPREGULATED GENES IN BLIA N LAR
+deg_data <- read_excel("ALLDEGs.xlsx", sheet = 1)
+#FC VALUE SETTING
+up_in_LAR <- deg_data[deg_data$logFC > 1, ]
+up_in_BLIA <- deg_data[deg_data$logFC < -1, ]
+#to remove unwanted
+#For LAR
+up_in_LAR <- up_in_LAR[!is.na(up_in_LAR$Gene.symbol) & up_in_LAR$Gene.symbol != "" & up_in_LAR$Gene.symbol != "-", ]
+# For BLIA
+up_in_BLIA <- up_in_BLIA[!is.na(up_in_BLIA$Gene.symbol) & up_in_BLIA$Gene.symbol != "" & up_in_BLIA$Gene.symbol != "-", ]
+#SAVE
+write.csv(up_in_LAR, "Upregulated_in_LAR.csv", row.names = FALSE)
+write.csv(up_in_BLIA, "Upregulated_in_BLIA.csv", row.names = FALSE)
+#to fnd top 250 in each
+top_LAR <- up_in_LAR[order(-up_in_LAR$logFC), ][1:250, ]
+top_BLIA <- up_in_BLIA[order(up_in_BLIA$logFC), ][1:250, ]
+#to sep just genenames
+genes_LAR <- top_LAR$Gene.symbol
+genes_BLIA <- top_BLIA$Gene.symbol
+#SAVE
+write.csv(top_LAR, "top_LAR.csv", row.names = FALSE)
+write.csv(top_BLIA, "top_BLIA.csv", row.names = FALSE)
+------------------------------
+#venn diagram
+gene_lists <- list(
+  LAR = genes_LAR,
+  BLIA = genes_BLIA
+)
+
+#the diagram
+ggvenn(gene_lists, 
+       fill_color = c("skyblue", "pink"),
+       stroke_size = 0.5, 
+       text_size = 5,
+       set_name_size = 5)
+------------------------------
+#to find top 20
+top20_LAR <- up_in_LAR[order(-up_in_LAR$logFC), ][1:20, ]
+top20_BLIA <- up_in_BLIA[order(up_in_BLIA$logFC), ][1:20, ]
+
+write.csv(top20_LAR, "top20_LAR.csv", row.names = FALSE)
+write.csv(top20_BLIA, "top20_BLIA.csv", row.names = FALSE)
